@@ -26,6 +26,8 @@ STOCKFISH_PATH = resource_path("stockfish", "stockfish", "stockfish-windows-x86-
 
 # ---------- Settings ----------
 SQUARE = 56
+BOARD_PX = SQUARE * 8
+EVAL_WIDTH = 24
 LIGHT, DARK = "#f0d9b5", "#b58863"
 LAST_MOVE_COLOR = "#cdd26a"
 SELECT_COLOR = "#f6f669"
@@ -130,7 +132,8 @@ board = chess.Board()
 my_color = None
 suggested_move = None
 selected = None
-hints_used = 0            # how many times you pressed "Show hint" this game
+hints_used = 0
+eval_on = False           # is the evaluation bar switched on?
 
 # Dragging / animation state
 dragging = False
@@ -250,6 +253,58 @@ def update_hover():
                       (col + 1) * SQUARE - 2, (row + 1) * SQUARE - 2)
 
 
+# ---------- Evaluation bar ----------
+def update_eval():
+    """Redraw the evaluation bar. Only asks Stockfish when the bar is switched on."""
+    global busy
+    eval_canvas.delete("all")
+
+    if not eval_on or my_color is None:
+        eval_canvas.create_rectangle(0, 0, EVAL_WIDTH, BOARD_PX, fill="#8a8a8a", outline="")
+        eval_label.config(text="Evaluation hidden")
+        return
+
+    white_share = 0.5          # 0 = Black is winning big, 1 = White is winning big
+    if board.is_checkmate():
+        white_share = 0.0 if board.turn == chess.WHITE else 1.0
+        text = "Checkmate"
+    elif board.is_game_over():
+        text = "Draw"
+    else:
+        busy = True
+        eval_label.config(text="Calculating...")
+        root.update()
+        info = engine.analyse(board, chess.engine.Limit(time=0.5))
+        busy = False
+        score = info["score"].white()      # always from White's point of view
+        if score.is_mate():
+            mate_in = score.mate()
+            white_share = 1.0 if mate_in > 0 else 0.0
+            text = ("White" if mate_in > 0 else "Black") + " mates in " + str(abs(mate_in))
+        else:
+            cp = score.score()
+            white_share = 0.5 + 0.5 * math.tanh(cp / 400)    # squashes big leads smoothly
+            text = "%+.2f  (positive = White ahead)" % (cp / 100)
+
+    white_px = white_share * BOARD_PX
+    eval_canvas.create_rectangle(0, 0, EVAL_WIDTH, BOARD_PX, fill="#2b2b2b", outline="")
+    if my_color == chess.WHITE:       # White at the bottom of the board, so white bar rises from the bottom
+        eval_canvas.create_rectangle(0, BOARD_PX - white_px, EVAL_WIDTH, BOARD_PX, fill="#f2f2f2", outline="")
+    else:                             # board is flipped, so White's side is at the top
+        eval_canvas.create_rectangle(0, 0, EVAL_WIDTH, white_px, fill="#f2f2f2", outline="")
+    eval_canvas.create_line(0, BOARD_PX // 2, EVAL_WIDTH, BOARD_PX // 2, fill="#c0392b", width=2)
+    eval_label.config(text=text)
+
+
+def toggle_eval():
+    global eval_on
+    if busy:
+        return
+    eval_on = not eval_on
+    eval_button.config(text="Hide evaluation" if eval_on else "Show evaluation")
+    update_eval()
+
+
 # ---------- Animation ----------
 def animate(piece, start, end, done, steps=10, delay=14):
     canvas.delete("drag")
@@ -342,10 +397,10 @@ def refresh():
         played_button.config(state="disabled")
         hint_button.config(state="disabled")
     draw_board()
+    update_eval()
 
 
 def show_hint():
-    """Ask Stockfish for the best move, but only when you press the button."""
     global suggested_move, busy, hints_used
     if busy or my_color is None or board.is_game_over():
         return
@@ -521,7 +576,7 @@ except Exception:
 
 root = tk.Tk()
 root.title("Chess Helper")
-root.geometry("480x780")
+root.geometry("520x830")
 root.protocol("WM_DELETE_WINDOW", on_close)
 
 try:
@@ -539,17 +594,25 @@ tk.Button(picker_frame, text="Play as Black", width=20, height=2,
 
 game_frame = tk.Frame(root)
 
-status_label = tk.Label(game_frame, text="", font=("Arial", 11), wraplength=440)
+status_label = tk.Label(game_frame, text="", font=("Arial", 11), wraplength=480)
 status_label.pack(pady=3)
 
 suggestion_label = tk.Label(game_frame, text="", font=("Arial", 20, "bold"), fg="green")
 suggestion_label.pack(pady=5)
 
-canvas = tk.Canvas(game_frame, width=SQUARE * 8, height=SQUARE * 8, highlightthickness=0)
-canvas.pack(pady=5)
+# Evaluation bar on the left, board on the right
+board_row = tk.Frame(game_frame)
+board_row.pack(pady=5)
+eval_canvas = tk.Canvas(board_row, width=EVAL_WIDTH, height=BOARD_PX, highlightthickness=0)
+eval_canvas.pack(side="left", padx=(0, 6))
+canvas = tk.Canvas(board_row, width=BOARD_PX, height=BOARD_PX, highlightthickness=0)
+canvas.pack(side="left")
 canvas.bind("<ButtonPress-1>", on_press)
 canvas.bind("<B1-Motion>", on_motion)
 canvas.bind("<ButtonRelease-1>", on_release)
+
+eval_label = tk.Label(game_frame, text="Evaluation hidden", font=("Arial", 10, "bold"))
+eval_label.pack(pady=2)
 
 buttons_frame = tk.Frame(game_frame)
 buttons_frame.pack(pady=8)
@@ -560,10 +623,13 @@ played_button.grid(row=0, column=1, padx=4)
 tk.Button(buttons_frame, text="Undo", width=8, command=undo_move).grid(row=0, column=2, padx=4)
 tk.Button(buttons_frame, text="New game", width=10, command=new_game).grid(row=0, column=3, padx=4)
 
+eval_button = tk.Button(game_frame, text="Show evaluation", width=18, command=toggle_eval)
+eval_button.pack(pady=3)
+
 hints_label = tk.Label(game_frame, text="Hints used this game: 0", font=("Arial", 10))
 hints_label.pack(pady=2)
 
-moves_label = tk.Label(game_frame, text="", wraplength=440, justify="left", font=("Arial", 10))
+moves_label = tk.Label(game_frame, text="", wraplength=480, justify="left", font=("Arial", 10))
 moves_label.pack(pady=5)
 
 root.mainloop()
