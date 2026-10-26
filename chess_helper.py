@@ -35,6 +35,11 @@ SUGGEST_FROM = "#6abf69"
 SUGGEST_TO = "#2e9e44"
 HOVER_COLOR = "#ffffff"
 
+# Colors for the top 3 moves: (arrow color, arrow width, text color, rank name)
+TOP_STYLES = [("#1b7f2f", 7, "#1b7f2f", "1st"),
+              ("#d4a017", 5, "#a87b00", "2nd"),
+              ("#d9622b", 5, "#c0501c", "3rd")]
+
 PIECE_SYMBOLS = {"P": "♟", "N": "♞", "B": "♝", "R": "♜", "Q": "♛", "K": "♚"}
 PROMO_CHOICES = [(chess.QUEEN, "Queen", "♛"), (chess.ROOK, "Rook", "♜"),
                  (chess.BISHOP, "Bishop", "♝"), (chess.KNIGHT, "Knight", "♞")]
@@ -130,10 +135,11 @@ engine = chess.engine.SimpleEngine.popen_uci(
     STOCKFISH_PATH, creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0))
 board = chess.Board()
 my_color = None
-suggested_move = None
+suggested_move = None     # the best move (1st choice)
+top_moves = []            # list of (move, evaluation text) for the top 3
 selected = None
 hints_used = 0
-eval_on = False           # is the evaluation bar switched on?
+eval_on = False
 
 # Dragging / animation state
 dragging = False
@@ -230,10 +236,13 @@ def draw_board():
                 x, y = cell_center(m.to_square)
                 canvas.create_oval(x - 6, y - 6, x + 6, y + 6, fill="#555555", outline="")
 
-    if suggested_move:
-        x1, y1 = cell_center(suggested_move.from_square)
-        x2, y2 = cell_center(suggested_move.to_square)
-        canvas.create_line(x1, y1, x2, y2, width=7, fill="#1b7f2f",
+    # Arrows for the top moves. Drawn 3rd -> 2nd -> 1st so the best one ends up on top.
+    for i in reversed(range(len(top_moves))):
+        move = top_moves[i][0]
+        arrow_color, arrow_width, _, _ = TOP_STYLES[i]
+        x1, y1 = cell_center(move.from_square)
+        x2, y2 = cell_center(move.to_square)
+        canvas.create_line(x1, y1, x2, y2, width=arrow_width, fill=arrow_color,
                            arrow=tk.LAST, arrowshape=(16, 18, 7))
 
     canvas.create_rectangle(-100, -100, -90, -90, outline=HOVER_COLOR, width=3, tags="hover")
@@ -264,7 +273,7 @@ def update_eval():
         eval_label.config(text="Evaluation hidden")
         return
 
-    white_share = 0.5          # 0 = Black is winning big, 1 = White is winning big
+    white_share = 0.5
     if board.is_checkmate():
         white_share = 0.0 if board.turn == chess.WHITE else 1.0
         text = "Checkmate"
@@ -276,21 +285,21 @@ def update_eval():
         root.update()
         info = engine.analyse(board, chess.engine.Limit(time=0.5))
         busy = False
-        score = info["score"].white()      # always from White's point of view
+        score = info["score"].white()
         if score.is_mate():
             mate_in = score.mate()
             white_share = 1.0 if mate_in > 0 else 0.0
             text = ("White" if mate_in > 0 else "Black") + " mates in " + str(abs(mate_in))
         else:
             cp = score.score()
-            white_share = 0.5 + 0.5 * math.tanh(cp / 400)    # squashes big leads smoothly
+            white_share = 0.5 + 0.5 * math.tanh(cp / 400)
             text = "%+.2f  (positive = White ahead)" % (cp / 100)
 
     white_px = white_share * BOARD_PX
     eval_canvas.create_rectangle(0, 0, EVAL_WIDTH, BOARD_PX, fill="#2b2b2b", outline="")
-    if my_color == chess.WHITE:       # White at the bottom of the board, so white bar rises from the bottom
+    if my_color == chess.WHITE:
         eval_canvas.create_rectangle(0, BOARD_PX - white_px, EVAL_WIDTH, BOARD_PX, fill="#f2f2f2", outline="")
-    else:                             # board is flipped, so White's side is at the top
+    else:
         eval_canvas.create_rectangle(0, 0, EVAL_WIDTH, white_px, fill="#f2f2f2", outline="")
     eval_canvas.create_line(0, BOARD_PX // 2, EVAL_WIDTH, BOARD_PX // 2, fill="#c0392b", width=2)
     eval_label.config(text=text)
@@ -364,6 +373,19 @@ def move_text(move):
     return text
 
 
+def score_text(score):
+    """Evaluation from the point of view of the side to move (you)."""
+    if score.is_mate():
+        n = score.mate()
+        return ("Mate in " + str(n)) if n > 0 else ("Getting mated in " + str(abs(n)))
+    return "%+.2f" % (score.score() / 100)
+
+
+def clear_top_labels():
+    for label in top_labels:
+        label.config(text="")
+
+
 def make_move(move):
     if move.promotion:
         play("promotion")
@@ -376,9 +398,11 @@ def make_move(move):
 
 def refresh():
     """Redraw and set up the new turn. On your turn the hint stays HIDDEN."""
-    global suggested_move, busy
+    global suggested_move, top_moves, busy
     moves_label.config(text="Moves so far: " + chess.Board().variation_san(board.move_stack))
     suggested_move = None
+    top_moves = []
+    clear_top_labels()
     busy = False
 
     if board.is_game_over():
@@ -401,7 +425,8 @@ def refresh():
 
 
 def show_hint():
-    global suggested_move, busy, hints_used
+    """Ask Stockfish for the top 3 moves, but only when you press the button."""
+    global suggested_move, top_moves, busy, hints_used
     if busy or my_color is None or board.is_game_over():
         return
     if board.turn != my_color or suggested_move is not None:
@@ -410,11 +435,23 @@ def show_hint():
     hint_button.config(state="disabled")
     suggestion_label.config(text="Thinking...", fg="gray")
     root.update()
-    result = engine.play(board, chess.engine.Limit(time=1.0))
-    suggested_move = result.move
+
+    infos = engine.analyse(board, chess.engine.Limit(time=1.5), multipv=3)
+    top_moves = []
+    for info in infos:
+        if "pv" in info and info["pv"]:
+            top_moves.append((info["pv"][0], score_text(info["score"].relative)))
+
+    suggested_move = top_moves[0][0]
     hints_used += 1
     hints_label.config(text="Hints used this game: " + str(hints_used))
     suggestion_label.config(text="Best move: " + move_text(suggested_move), fg="green")
+
+    for i, (move, text) in enumerate(top_moves):
+        _, _, text_color, rank = TOP_STYLES[i]
+        top_labels[i].config(text=rank + ":  " + move_text(move) + "    (" + text + ")",
+                             fg=text_color)
+
     played_button.config(state="normal")
     busy = False
     draw_board()
@@ -541,10 +578,11 @@ def undo_move():
 
 
 def start_game(color):
-    global my_color, board, suggested_move, selected, hints_used
+    global my_color, board, suggested_move, top_moves, selected, hints_used
     my_color = color
     board = chess.Board()
     suggested_move = None
+    top_moves = []
     selected = None
     hints_used = 0
     hints_label.config(text="Hints used this game: 0")
@@ -576,7 +614,7 @@ except Exception:
 
 root = tk.Tk()
 root.title("Chess Helper")
-root.geometry("520x830")
+root.geometry("860x740")
 root.protocol("WM_DELETE_WINDOW", on_close)
 
 try:
@@ -594,15 +632,25 @@ tk.Button(picker_frame, text="Play as Black", width=20, height=2,
 
 game_frame = tk.Frame(root)
 
-status_label = tk.Label(game_frame, text="", font=("Arial", 11), wraplength=480)
-status_label.pack(pady=3)
+status_label = tk.Label(game_frame, text="", font=("Arial", 11), wraplength=700)
+status_label.pack(pady=2)
 
-suggestion_label = tk.Label(game_frame, text="", font=("Arial", 20, "bold"), fg="green")
-suggestion_label.pack(pady=5)
+# Buttons at the top
+buttons_frame = tk.Frame(game_frame)
+buttons_frame.pack(pady=4)
+hint_button = tk.Button(buttons_frame, text="Show hint", width=10, command=show_hint)
+hint_button.grid(row=0, column=0, padx=4)
+played_button = tk.Button(buttons_frame, text="Play the hint", command=play_suggestion)
+played_button.grid(row=0, column=1, padx=4)
+tk.Button(buttons_frame, text="Undo", width=8, command=undo_move).grid(row=0, column=2, padx=4)
+tk.Button(buttons_frame, text="New game", width=10, command=new_game).grid(row=0, column=3, padx=4)
+eval_button = tk.Button(buttons_frame, text="Show evaluation", width=18, command=toggle_eval)
+eval_button.grid(row=0, column=4, padx=4)
 
-# Evaluation bar on the left, board on the right
+# Evaluation bar + board on the left, info panel on the right
 board_row = tk.Frame(game_frame)
-board_row.pack(pady=5)
+board_row.pack(pady=4)
+
 eval_canvas = tk.Canvas(board_row, width=EVAL_WIDTH, height=BOARD_PX, highlightthickness=0)
 eval_canvas.pack(side="left", padx=(0, 6))
 canvas = tk.Canvas(board_row, width=BOARD_PX, height=BOARD_PX, highlightthickness=0)
@@ -611,25 +659,28 @@ canvas.bind("<ButtonPress-1>", on_press)
 canvas.bind("<B1-Motion>", on_motion)
 canvas.bind("<ButtonRelease-1>", on_release)
 
-eval_label = tk.Label(game_frame, text="Evaluation hidden", font=("Arial", 10, "bold"))
-eval_label.pack(pady=2)
+side_panel = tk.Frame(board_row, width=300)
+side_panel.pack(side="left", anchor="n", padx=(14, 0))
 
-buttons_frame = tk.Frame(game_frame)
-buttons_frame.pack(pady=8)
-hint_button = tk.Button(buttons_frame, text="Show hint", width=10, command=show_hint)
-hint_button.grid(row=0, column=0, padx=4)
-played_button = tk.Button(buttons_frame, text="Play the hint", command=play_suggestion)
-played_button.grid(row=0, column=1, padx=4)
-tk.Button(buttons_frame, text="Undo", width=8, command=undo_move).grid(row=0, column=2, padx=4)
-tk.Button(buttons_frame, text="New game", width=10, command=new_game).grid(row=0, column=3, padx=4)
+suggestion_label = tk.Label(side_panel, text="", font=("Arial", 16, "bold"),
+                            fg="green", wraplength=290, justify="left")
+suggestion_label.pack(anchor="w", pady=(0, 8))
 
-eval_button = tk.Button(game_frame, text="Show evaluation", width=18, command=toggle_eval)
-eval_button.pack(pady=3)
+# The top 3 moves list (empty until you press Show hint)
+top_labels = []
+for _ in range(3):
+    lbl = tk.Label(side_panel, text="", font=("Arial", 11, "bold"), justify="left")
+    lbl.pack(anchor="w", pady=1)
+    top_labels.append(lbl)
 
-hints_label = tk.Label(game_frame, text="Hints used this game: 0", font=("Arial", 10))
-hints_label.pack(pady=2)
+eval_label = tk.Label(side_panel, text="Evaluation hidden", font=("Arial", 10, "bold"),
+                      wraplength=290, justify="left")
+eval_label.pack(anchor="w", pady=(20, 4))
 
-moves_label = tk.Label(game_frame, text="", wraplength=480, justify="left", font=("Arial", 10))
-moves_label.pack(pady=5)
+hints_label = tk.Label(side_panel, text="Hints used this game: 0", font=("Arial", 10))
+hints_label.pack(anchor="w", pady=4)
+
+moves_label = tk.Label(side_panel, text="", wraplength=290, justify="left", font=("Arial", 10))
+moves_label.pack(anchor="w", pady=4)
 
 root.mainloop()
