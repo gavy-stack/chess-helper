@@ -16,7 +16,7 @@ except ImportError:
     winsound = None
 
 
-# ---------- Finding files (works in VS Code AND inside the .exe) ----------
+# ---------- Finding files ----------
 def resource_path(*parts):
     base = getattr(sys, "_MEIPASS", os.path.dirname(os.path.abspath(__file__)))
     return os.path.join(base, *parts)
@@ -45,7 +45,6 @@ SOUND_DIR = os.path.join(tempfile.gettempdir(), "chess_helper_sounds")
 
 
 def tone(freq, duration, volume, noise=0.0, decay=20):
-    """Simple fading tone (used for the promotion sound)."""
     samples = []
     for i in range(int(RATE * duration)):
         t = i / RATE
@@ -56,12 +55,10 @@ def tone(freq, duration, volume, noise=0.0, decay=20):
     return samples
 
 
-# Wood "modes": (pitch in Hz, loudness, how fast it fades). Tweak these to change the sound!
 WOOD_MODES = [(170, 1.0, 45), (390, 0.6, 60), (720, 0.4, 85), (1180, 0.25, 120)]
 
 
 def knock(pitch=1.0, click=0.6, length=0.18):
-    """One wooden 'thock': a tiny click followed by fading wood tones."""
     rng = random.Random(7)
     n = int(RATE * length)
     out = []
@@ -71,14 +68,13 @@ def knock(pitch=1.0, click=0.6, length=0.18):
         s = 0.0
         for freq, amp, decay in WOOD_MODES:
             s += amp * math.sin(2 * math.pi * freq * pitch * t) * math.exp(-decay * t)
-        lowpassed += 0.3 * (rng.uniform(-1, 1) - lowpassed)      # softened noise = the click
+        lowpassed += 0.3 * (rng.uniform(-1, 1) - lowpassed)
         s += click * 3 * lowpassed * math.exp(-700 * t)
         out.append(s)
     return out
 
 
 def mix(parts, peak):
-    """Layer several sounds (each starting at its own time) into one."""
     total = max(int(offset * RATE) + len(s) for offset, s in parts)
     buf = [0.0] * total
     for offset, s in parts:
@@ -109,8 +105,6 @@ def make_sounds():
     sounds["promotion"] = save_wav(
         "promotion", [s * 1.0 for s in (tone(523, 0.12, 0.6, decay=8) + tone(659, 0.12, 0.6, decay=8)
                                         + tone(784, 0.12, 0.6, decay=8) + tone(1047, 0.35, 0.6, decay=6))])
-    # Optional: real recordings override the generated sounds.
-    # Put move.wav / capture.wav / promotion.wav in a folder called "sounds" next to this file.
     for name in sounds:
         custom = resource_path("sounds", name + ".wav")
         if os.path.exists(custom):
@@ -136,14 +130,15 @@ board = chess.Board()
 my_color = None
 suggested_move = None
 selected = None
+hints_used = 0            # how many times you pressed "Show hint" this game
 
 # Dragging / animation state
 dragging = False
 drag_from = None
 drag_x = drag_y = 0
 press_was_selected = False
-hidden_square = None      # a square whose piece is currently "floating" (so we don't draw it twice)
-busy = False              # True while thinking or animating (ignores clicks)
+hidden_square = None
+busy = False
 
 
 # ---------- Board <-> screen position ----------
@@ -166,7 +161,6 @@ def cell_center(sq):
 
 
 def square_at(x, y):
-    """The board square under a screen position, or None if outside the board."""
     col, row = int(x // SQUARE), int(y // SQUARE)
     if 0 <= col < 8 and 0 <= row < 8:
         return cell_to_square(col, row)
@@ -185,7 +179,7 @@ def draw_piece(piece, x, y, tag=None, size=30, shadow=False):
     symbol = PIECE_SYMBOLS[piece.symbol().upper()]
     font = ("Segoe UI Symbol", size)
     tags = (tag,) if tag else ()
-    if shadow:   # makes a lifted piece look like it's floating
+    if shadow:
         canvas.create_text(x + 4, y + 7, text=symbol, font=font, fill="#6b5232", tags=tags)
     for dx, dy in ((-1, -1), (1, -1), (-1, 1), (1, 1)):
         canvas.create_text(x + dx, y + dy, text=symbol, font=font, fill="black", tags=tags)
@@ -239,7 +233,6 @@ def draw_board():
         canvas.create_line(x1, y1, x2, y2, width=7, fill="#1b7f2f",
                            arrow=tk.LAST, arrowshape=(16, 18, 7))
 
-    # outline of the square the dragged piece is hovering over
     canvas.create_rectangle(-100, -100, -90, -90, outline=HOVER_COLOR, width=3, tags="hover")
 
     if dragging:
@@ -259,14 +252,13 @@ def update_hover():
 
 # ---------- Animation ----------
 def animate(piece, start, end, done, steps=10, delay=14):
-    """Slide a floating piece from start to end, then call done()."""
     canvas.delete("drag")
     draw_piece(piece, start[0], start[1], tag="drag", size=36, shadow=True)
     pos = [start[0], start[1]]
 
     def step(i):
         t = i / steps
-        t = 1 - (1 - t) ** 3                       # starts fast, settles gently
+        t = 1 - (1 - t) ** 3
         nx = start[0] + (end[0] - start[0]) * t
         ny = start[1] + (end[1] - start[1]) * t
         canvas.move("drag", nx - pos[0], ny - pos[1])
@@ -328,41 +320,52 @@ def make_move(move):
 
 
 def refresh():
+    """Redraw and set up the new turn. On your turn the hint stays HIDDEN."""
     global suggested_move, busy
     moves_label.config(text="Moves so far: " + chess.Board().variation_san(board.move_stack))
+    suggested_move = None
+    busy = False
 
     if board.is_game_over():
-        suggested_move = None
-        busy = False
         status_label.config(text="Game over.")
         suggestion_label.config(text="Result: " + board.result(), fg="red")
         played_button.config(state="disabled")
-        draw_board()
-        return
-
-    if board.turn == my_color:
-        status_label.config(text="YOUR TURN. Play the suggestion, or drag your own move.")
-        suggestion_label.config(text="Thinking...", fg="gray")
-        suggested_move = None
-        busy = True
-        draw_board()
-        root.update()
-        result = engine.play(board, chess.engine.Limit(time=1.0))
-        suggested_move = result.move
-        busy = False
-        suggestion_label.config(text="Best move: " + move_text(suggested_move), fg="green")
-        played_button.config(state="normal")
+        hint_button.config(state="disabled")
+    elif board.turn == my_color:
+        status_label.config(text="YOUR TURN. Think first! Drag your move, or press Show hint.")
+        suggestion_label.config(text="Hint hidden", fg="gray")
+        played_button.config(state="disabled")
+        hint_button.config(state="normal")
     else:
-        suggested_move = None
-        busy = False
         status_label.config(text="OPPONENT'S TURN. Drag the piece they moved to where it went.")
         suggestion_label.config(text="Waiting for opponent...", fg="gray")
         played_button.config(state="disabled")
+        hint_button.config(state="disabled")
+    draw_board()
+
+
+def show_hint():
+    """Ask Stockfish for the best move, but only when you press the button."""
+    global suggested_move, busy, hints_used
+    if busy or my_color is None or board.is_game_over():
+        return
+    if board.turn != my_color or suggested_move is not None:
+        return
+    busy = True
+    hint_button.config(state="disabled")
+    suggestion_label.config(text="Thinking...", fg="gray")
+    root.update()
+    result = engine.play(board, chess.engine.Limit(time=1.0))
+    suggested_move = result.move
+    hints_used += 1
+    hints_label.config(text="Hints used this game: " + str(hints_used))
+    suggestion_label.config(text="Best move: " + move_text(suggested_move), fg="green")
+    played_button.config(state="normal")
+    busy = False
     draw_board()
 
 
 def build_move(frm, to):
-    """Returns a legal move (asking about promotion if needed), or None."""
     moving = board.piece_at(frm)
     move = chess.Move(frm, to)
     if moving.piece_type == chess.PAWN and chess.square_rank(to) in (0, 7):
@@ -392,7 +395,6 @@ def finish_back():
 
 
 def attempt_move(frm, to, start_xy):
-    """Try to move a piece; slide it into place if legal, or back home if not."""
     global busy, hidden_square, selected
     piece = board.piece_at(frm)
     move = build_move(frm, to) if to is not None else None
@@ -417,7 +419,6 @@ def on_press(event):
     piece = board.piece_at(sq)
     own_piece = piece is not None and piece.color == board.turn
 
-    # A piece is already selected and you clicked somewhere else: try that move
     if selected is not None and sq != selected and not own_piece:
         attempt_move(selected, sq, cell_center(selected))
         return
@@ -452,7 +453,7 @@ def on_release(event):
     canvas.config(cursor="")
     target = square_at(event.x, event.y)
 
-    if target == drag_from:                  # it was just a click, not a drag
+    if target == drag_from:
         if press_was_selected:
             selected = None
         draw_board()
@@ -485,11 +486,13 @@ def undo_move():
 
 
 def start_game(color):
-    global my_color, board, suggested_move, selected
+    global my_color, board, suggested_move, selected, hints_used
     my_color = color
     board = chess.Board()
     suggested_move = None
     selected = None
+    hints_used = 0
+    hints_label.config(text="Hints used this game: 0")
     picker_frame.pack_forget()
     game_frame.pack(pady=10)
     refresh()
@@ -510,7 +513,6 @@ def on_close():
 
 
 # ---------- The window ----------
-# Makes Windows show YOUR icon on the taskbar instead of Python's
 try:
     import ctypes
     ctypes.windll.shell32.SetCurrentProcessExplicitAppUserModelID("gavri.chesshelper")
@@ -519,10 +521,9 @@ except Exception:
 
 root = tk.Tk()
 root.title("Chess Helper")
-root.geometry("480x740")
+root.geometry("480x780")
 root.protocol("WM_DELETE_WINDOW", on_close)
 
-# Window icon (top-left corner of the app)
 try:
     root.iconbitmap(resource_path("ChessHelper.ico"))
 except Exception:
@@ -552,10 +553,15 @@ canvas.bind("<ButtonRelease-1>", on_release)
 
 buttons_frame = tk.Frame(game_frame)
 buttons_frame.pack(pady=8)
-played_button = tk.Button(buttons_frame, text="I played the suggestion", command=play_suggestion)
-played_button.grid(row=0, column=0, padx=4)
-tk.Button(buttons_frame, text="Undo", width=8, command=undo_move).grid(row=0, column=1, padx=4)
-tk.Button(buttons_frame, text="New game", width=10, command=new_game).grid(row=0, column=2, padx=4)
+hint_button = tk.Button(buttons_frame, text="Show hint", width=10, command=show_hint)
+hint_button.grid(row=0, column=0, padx=4)
+played_button = tk.Button(buttons_frame, text="Play the hint", command=play_suggestion)
+played_button.grid(row=0, column=1, padx=4)
+tk.Button(buttons_frame, text="Undo", width=8, command=undo_move).grid(row=0, column=2, padx=4)
+tk.Button(buttons_frame, text="New game", width=10, command=new_game).grid(row=0, column=3, padx=4)
+
+hints_label = tk.Label(game_frame, text="Hints used this game: 0", font=("Arial", 10))
+hints_label.pack(pady=2)
 
 moves_label = tk.Label(game_frame, text="", wraplength=440, justify="left", font=("Arial", 10))
 moves_label.pack(pady=5)
