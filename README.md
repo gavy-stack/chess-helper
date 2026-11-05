@@ -1,12 +1,12 @@
 # Chess Helper
 
 A training tool for practicing against chess bots offline. Enter the bot's moves
-on the board, and Stockfish suggests your best next move with a green arrow.
+on the board, and Stockfish suggests your best next move with green, yellow, and red arrows.
 Includes drag-and-drop pieces, wooden-style sound effects, undo, and pawn promotion choices.
 
 **For practice against bots only. Do not use it in live games against people or on sites with fair-play rules.**
 
-⚠️ **Also, the development of this tool is vibe coded. It is not something I develop on my own knowledge.**
+⚠️ **The development of this tool is vibe coded, not something I develop on my own knowledge.**
 
 ## Setup (Windows)
 
